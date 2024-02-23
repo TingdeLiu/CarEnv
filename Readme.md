@@ -54,10 +54,11 @@ If you find this environment useful, you may cite it by our paper in which it wa
 
 ```bibtex
 @inproceedings { SchRei2023b,
-  author = {Maximilian Schier and Christoph Reinders and Bodo Rosenhahn},
+  author = {Schier, Maximilian and Reinders, Christoph and Rosenhahn, Bodo},
   title = {Learned Fourier Bases for Deep Set Feature Extractors in Automotive Reinforcement Learning},
   booktitle = {2023 IEEE 26th International Conference on Intelligent Transportation Systems (ITSC)},
   year = {2023},
-  month = sep,
-  pages = {to appear}
+  pages = {931-938},
+  doi = {10.1109/ITSC57777.2023.10422233}
 }
+```
