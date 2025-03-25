@@ -4,14 +4,12 @@ from copy import deepcopy
 VEH_CAR_KINEMATIC = {
     'type': 'bicycle',
     'wheelbase': 2.4,
+    'beta_rate': 1.04719,  # rad/s = 60°/s
 }
 
 
 PARALLEL_PARKING = {
     'action': {'type': 'continuous_steering_accel'},
-    'longitudinal': {'type': 'simple'},
-    # 'steering': 'direct()',
-    'steering': 'linear(60)',
     'problem': {'type': 'parallel_parking', 'start': 'after', 'max_time': 15},
     'collision_bb': (-3.81 / 2, 3.81 / 2, -1.48 / 2, 1.48 / 2),
     'dt': .1,
@@ -48,8 +46,6 @@ VEH_CAR_DYNAMIC = {
 # Racing with dynamic single track model
 RACING = {
     'action': {'type': 'continuous_steering_pedals'},
-    'longitudinal': {'type': 'simple'},
-    'steering': 'linear(60)',
     'collision_bb': (-3.81 / 2, 3.81 / 2, -1.48 / 2, 1.48 / 2),
     'vehicle': VEH_CAR_DYNAMIC,
     'problem': {'type': 'racing', 'track_width': 8., 'cone_width': 7., 'k_forwards': .1, 'k_base': .0, 'extend': 150, 'time_limit': 60.},
@@ -64,9 +60,30 @@ RACING = {
 }
 
 
+# Racing but only observing center-line instead of cones
+RACING_TRACKING = deepcopy(RACING)
+RACING_TRACKING['problem']['place_cones'] = False
+RACING_TRACKING['sensors'].pop('cones_set')
+RACING_TRACKING['sensors']['trajectory'] = {
+    'type': 'trajectory',
+}
+
+
+INTERSECTION = deepcopy(RACING)
+INTERSECTION['sensors'] = {}
+INTERSECTION['problem'] = {'type': 'intersection'}
+
+MARL_INTERSECTION = deepcopy(INTERSECTION)
+MARL_INTERSECTION['sensors'] = {'vehicles_set': {'type': 'vehicles'}}
+MARL_INTERSECTION['problem'] = {'type': 'marl_intersection'}
+
+
 _STANDARD_ENVS = {
+    'intersection': INTERSECTION,  # Deliberately not included in registry below (more of a base env)
+    'marl_intersection': MARL_INTERSECTION,
     'parking': PARALLEL_PARKING,
     'racing': RACING,
+    'racing_tracking': RACING_TRACKING,
 }
 
 
@@ -82,6 +99,7 @@ def get_standard_env_names():
 _REGISTRY = {
     'CarEnv-Racing-v1': {'config': get_standard_env_config('racing')},
     'CarEnv-Parking-v1': {'config': get_standard_env_config('parking')},
+    'CarEnv-RacingTracking-v1': {'config': get_standard_env_config('racing_tracking')},
 }
 
 

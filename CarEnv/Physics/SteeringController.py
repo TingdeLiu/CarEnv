@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Tuple
+from numba import jit
 
 
 class AbstractSteeringModel:
@@ -27,10 +27,24 @@ class DirectSteeringModel(AbstractSteeringModel):
         self._beta = 0.
 
     def integrate(self, control, dt):
+        assert np.isfinite(control)
         self._beta = np.clip(control * self.beta_max, -self.beta_max, self.beta_max)
 
 
+@jit(nopython=True)
+def _rate_limited_integrate(beta_max, beta_rate, beta_old, control, dt):
+    beta_target = min(max(control * beta_max, -beta_max), beta_max)
+    d_beta = np.sign(beta_target - beta_old) * beta_rate
+    new_beta = min(max(beta_old + dt * d_beta, -beta_max), beta_max)
+    zero_crossing = np.sign(beta_target - beta_old) != np.sign(beta_target - new_beta)
+    if zero_crossing:
+        new_beta = beta_target
+    return new_beta
+
+
 class RateLimitedSteeringModel(AbstractSteeringModel):
+    __slots__ = ("beta_max", "beta_rate", "_beta")
+
     def __init__(self, beta_max: float, beta_rate: float):
         self.beta_max = beta_max
         self.beta_rate = beta_rate
@@ -45,10 +59,5 @@ class RateLimitedSteeringModel(AbstractSteeringModel):
 
     def integrate(self, control, dt):
         assert np.shape(control) == ()
-        beta_target = np.clip(control * self.beta_max, -self.beta_max, self.beta_max)
-        d_beta = np.sign(beta_target - self._beta) * self.beta_rate
-        new_beta = np.clip(self._beta + dt * d_beta, -self.beta_max, self.beta_max)
-        zero_crossing = np.sign(beta_target - self._beta) != np.sign(beta_target - new_beta)
-        if zero_crossing:
-            new_beta = beta_target
-        self._beta = new_beta
+        assert np.isfinite(control)
+        self._beta = _rate_limited_integrate(self.beta_max, self.beta_rate, self._beta, control, dt)

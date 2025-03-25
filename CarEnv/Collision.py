@@ -80,3 +80,45 @@ def intersections_aabb_circles(aabb, r, centers):
     result = np.zeros(len(centers), dtype=bool)
     result[candidate_mask] = np.logical_or(candidate_simple_match, candidate_corner_match)
     return result
+
+
+def intersection_distances_aabb_circles(aabb, r, centers):
+    assert np.asarray(aabb).shape == (4,)
+    assert np.asarray(r).shape == ()
+    assert len(centers.shape) == 2
+    assert centers.shape[1] == 2
+
+    x1, x2, y1, y2 = aabb
+
+    # Intersection candidates identical to intersection case
+    candidate_mask = np.logical_and(
+        np.logical_and(x1 - r < centers[:, 0], centers[:, 0] < x2 + r),
+        np.logical_and(y1 - r < centers[:, 1], centers[:, 1] < y2 + r),
+    )
+
+    candidates = centers[candidate_mask]
+    candidates_dist = np.full(len(candidates), np.inf)
+
+    x_bounds_mask = np.logical_and(x1 < candidates[:, 0], candidates[:, 0] < x2)
+    y_bounds_mask = np.logical_and(y1 < candidates[:, 1], candidates[:, 1] < y2)
+
+    candidates_dist[x_bounds_mask & y_bounds_mask] = 0.
+
+    # Distance to edges
+    dist = np.abs(candidates[x_bounds_mask, 1] - y1)
+    candidates_dist[x_bounds_mask] = np.minimum(candidates_dist[x_bounds_mask], dist)
+    dist = np.abs(candidates[x_bounds_mask, 1] - y2)
+    candidates_dist[x_bounds_mask] = np.minimum(candidates_dist[x_bounds_mask], dist)
+    dist = np.abs(candidates[y_bounds_mask, 0] - x1)
+    candidates_dist[y_bounds_mask] = np.minimum(candidates_dist[y_bounds_mask], dist)
+    dist = np.abs(candidates[y_bounds_mask, 0] - x2)
+    candidates_dist[y_bounds_mask] = np.minimum(candidates_dist[y_bounds_mask], dist)
+
+    # Distance to corners
+    for corner in np.array([(x1, y1), (x1, y2), (x2, y1), (x2, y2)]):
+        dists = np.linalg.norm(candidates - corner, axis=-1)
+        candidates_dist = np.minimum(candidates_dist, dists)
+
+    result = np.full(len(centers), np.inf)
+    result[candidate_mask] = candidates_dist
+    return result

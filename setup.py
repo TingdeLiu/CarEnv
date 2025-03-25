@@ -9,8 +9,10 @@ setup(
         'matplotlib>=3.5',
         'numba>=0.56',
         'numpy>=1.22',
+        'pettingzoo==1.24.3',
         'pycairo~=1.21',
         'pygame~=2.1',
+        'scipy~=1.11.4',
         'Shapely~=1.8.4'
     ],
     extras_require={

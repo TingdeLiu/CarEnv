@@ -3,6 +3,9 @@ import gymnasium as gym
 
 
 class Action:
+    def __init__(self, env):
+        self.env = env
+
     @property
     def action_space(self) -> gym.Space:
         raise NotImplementedError

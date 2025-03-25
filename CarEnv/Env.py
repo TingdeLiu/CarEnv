@@ -6,9 +6,12 @@ import gymnasium as gym
 
 import numpy as np
 
-from .Physics.BicycleModel import BicycleModel
-from .BatchedObjects import BatchedObjects
+from .ReadOnlyCollections import ReadOnlyDict
+from .Metrics import Metric
+from .Object import Object
 from .Sensor import Sensor
+from .Agent import Agent
+from .Rendering.EnvRenderer import make_env_renderer
 
 
 class DiscreteSteerAction(IntEnum):
@@ -35,41 +38,82 @@ def parse_generic(token: str):
     return func_name, args
 
 
-def make_longitudinal_model(config: dict):
-    from .Physics.VelocityController import SimpleEngineDragVelocityController, DirectVelocityController, \
-        LinearVelocityController
-    params = config.get('longitudinal', {'type': 'linear'})
+def make_action(env, action_dict):
+    from .Actions import ContinuousSteeringAction, HumanContinuousSteeringAccelAction, ContinuousSteeringAccelAction
+    from .Actions import HumanContinuousSteeringPedalsAction, ContinuousSteeringPedalsAction
+    from .Actions import HumanContinuousSteeringAccelToggleAction
 
     known_types = {
-        'direct': DirectVelocityController,
-        'linear': LinearVelocityController,
-        'simple': SimpleEngineDragVelocityController,
+        'continuous_steering': ContinuousSteeringAction,
+        'continuous_steering_pedals': ContinuousSteeringPedalsAction,
+        'continuous_steering_accel': ContinuousSteeringAccelAction,
+        'human': HumanContinuousSteeringAccelAction,
+        'human_pedals': HumanContinuousSteeringPedalsAction,
+        'human_toggle': HumanContinuousSteeringAccelToggleAction,
     }
 
-    kwargs = {k: v for k, v in params.items() if k != 'type'}
-    return known_types[params['type']](**kwargs)
+    kwargs = {k: v for k, v in action_dict.items() if k != 'type'}
+
+    return known_types[action_dict['type']](env, **kwargs)
 
 
-def make_problem(config: dict):
-    from .Problems import FreeDriveProblem, ParallelParkingProblem, RacingProblem
+def make_problem(env, config: dict):
+    from .Problems import FreeDriveProblem, ParallelParkingProblem, RacingProblem, IntersectionProblem
 
     params = config.get('problem', {'type': 'freedrive'})
 
     known_types = {
         'freedrive': FreeDriveProblem,
+        'intersection': IntersectionProblem,
         'parallel_parking': ParallelParkingProblem,
         'racing': RacingProblem,
     }
 
     kwargs = {k: v for k, v in params.items() if k != 'type'}
-    return known_types[params['type']](**kwargs)
+    return known_types[params['type']](env, **kwargs)
 
 
-def parse_vehicle(config: dict):
-    params = config.get('vehicle', {'type': 'simple', 'wheelbase': 2.4, 'mass': 700.})
+def make_sensors(env, proxy, sensor_mapping):
+    from .SensorConeMap import SensorConeMap
+    from .SensorVehicles import SensorVehicles
+    from .SensorTrajectory import SensorTrajectory
+
+    known_types = {
+        'conemap': SensorConeMap,
+        'trajectory': SensorTrajectory,
+        'vehicles': SensorVehicles,
+    }
+
+    sensors = {}
+
+    for s_key, s_val in sensor_mapping.items():
+        sensor_type = s_val['type']
+        kwargs = {k: v for k, v in s_val.items() if k != 'type'}
+
+        sensors[s_key] = known_types[sensor_type](env, proxy, **kwargs)
+
+    return sensors
+
+
+def parse_vehicle(config: dict, key='vehicle'):
+    params = config.get(key, {'type': 'simple', 'wheelbase': 2.4, 'mass': 700.})
+    params['physics_divider'] = config.get('physics_divider', 1)
 
     kwargs = {k: v for k, v in params.items() if k != 'type'}
     return params['type'], kwargs
+
+
+def make_vehicle(config: dict, key='vehicle'):
+    veh_model, vm_kwargs = parse_vehicle(config, key=key)
+
+    if veh_model == 'bicycle':
+        from .Physics.BicycleModel import BicycleModel
+        return BicycleModel(**vm_kwargs)
+    elif veh_model == 'dyn_dugoff':
+        from .Physics.SingleTrackDugoffModel import SingleTrackDugoffModel
+        return SingleTrackDugoffModel(**vm_kwargs)
+    else:
+        raise ValueError(f"{veh_model = }")
 
 
 class CarEnv(gym.Env):
@@ -86,115 +130,94 @@ class CarEnv(gym.Env):
         self.action_space = self._action.action_space
 
         self.dt = config.get('dt', .2)
-        self.problem = make_problem(self._config)
-        self.physics_divider = config.get('physics_divider', 1)
+        self.problem = make_problem(self, self._config)
 
-        self.vehicle_state = None
-        self.vehicle_model = None
-        self.vehicle_last_speed = None
         self._reset_required = True
 
-        self.objects: Dict[str, BatchedObjects] = {}
-        self.sensors: Dict[str, Sensor] = {}
-        self.metrics: Dict[str, float] = {}
-        self._pending_reward = 0
-        self._pending_info = {}
-        self.last_observations = {}
+        self._objects: Dict[str, Object] = {}
+        self.metrics: Dict[str, Metric] = {}
+
+        self.agent = None
 
         self.collision_bb = self._config.get('collision_bb', (-1.5, 1.5, -0.8, 0.8))
-        self.k_cone_hit = .2
-        self.k_center = .0
         self.steering_history_length = 20
 
-        # Set up rendering
-        self.__renderer = None
-        self.__screen = None
         self.render_mode = render_mode
-        render_kwargs = render_kwargs or {}
-        self.__render_width, self.__render_height = render_kwargs.get('width', 1280), render_kwargs.get('height', 720)
-
-        if self.render_mode == 'human':
-            import pygame
-            pygame.init()
-            fs = render_kwargs.get('fullscreen', False)
-            screen_flags = pygame.FULLSCREEN if fs else 0
-            rw, rh = (0, 0) if fs else (self.__render_width, self.__render_height)
-            self.__screen = pygame.display.set_mode([rw, rh], flags=screen_flags, vsync=0)
-            pygame.display.set_caption('CarEnv')
-            self.__render_width, self.__render_height = self.__screen.get_width(), self.__screen.get_height()
-        if self.render_mode in ['human', 'rgb_array']:
-            from .Rendering.BirdView import BirdViewRenderer
-            prob_render_hints = self.problem.render_hints if hasattr(self.problem, 'render_hints') else {}
-            kwargs = {'orient_forward': prob_render_hints.get('from_ego', True)}
-
-            if 'scale' in prob_render_hints:
-                kwargs['scale'] = prob_render_hints['scale']
-
-            kwargs.update(render_kwargs.get('hints', {}))
-
-            # TODO: Should the renderer be cleaned up somewhere?
-            self.__renderer = BirdViewRenderer(self.__render_width, self.__render_height, **kwargs)
+        self._renderer = make_env_renderer(self, render_mode, render_kwargs)
 
         # Statistics
         self.steps = 0
         self.time = 0
-        self.traveled_distance = 0.
-
-        # Histories
-        self.steering_history = None
 
         # Query sensors for obs space, do this last such that everything initialized
         obs_space = {
             "state": self.problem.state_observation_space,
         }
 
-        for s_key, s_val in self._make_sensors().items():
+        for s_key, s_val in self._make_sensors(None).items():
             obs_space[s_key] = s_val.observation_space
 
         self.observation_space = gym.spaces.Dict(obs_space)
 
-    def _render_impl(self):
-        if self.render_mode in ['human', 'rgb_array']:
-            rgb_array = self.__renderer.render(self)
-
-            if self.render_mode == 'rgb_array':
-                return rgb_array
-
-            import pygame
-            # Consume events
-            for ev in pygame.event.get():
-                if ev.type == pygame.QUIT:
-                    raise KeyboardInterrupt()
-
-            # pygame expects column major
-            pygame.surfarray.blit_array(self.__screen, np.transpose(rgb_array, (1, 0, 2)))
-            pygame.display.flip()
-        elif self.render_mode is None:
-            pass
-        else:
-            raise ValueError(f"{self.render_mode = }")
-
     def render(self):
-        if self.render_mode == 'human':
-            # Do nothing if we are already rendering in human mode in reset() and step()
-            return
-        else:
-            return self._render_impl()
+        return self._renderer.render_manual()
+
+    @property
+    def vehicle_model(self):
+        return self.agent.proxy.model
+
+    @property
+    def objects(self) -> Dict[str, Object]:
+        return ReadOnlyDict(self._objects)
+
+    def add_object(self, key: str, value: Object):
+        if key in self._objects:
+            raise KeyError(f"Object with key {key} already exists")
+
+        self._objects[key] = value
+
+    @property
+    def agents(self):
+        """
+        Get the name of currently active agents, for compatibility with multi agent env interface
+        """
+        return ["ego_proxy"]
+
+    def get_agent(self, name):
+        if name != "ego_proxy":
+            raise ValueError(f"{name = }")
+
+        return self.agent
+
+    @property
+    def sensors(self) -> Dict[str, Sensor]:
+        return self.agent.sensors
 
     def add_to_reward(self, val):
-        self._pending_reward += val
+        self.agent.add_to_reward(val)
 
     def add_info(self, key, val):
-        self._pending_info[key] = val
+        self.agent.add_info(key, val)
+
+    def get_or_create_metric(self, key, producer):
+        try:
+            return self.metrics[key]
+        except KeyError:
+            m = producer()
+            self.metrics[key] = m
+            return m
 
     def set_reward(self, val):
-        self._pending_reward = val
+        self.agent.set_reward(val)
+
+    def set_terminated(self, val):
+        self.agent.set_terminated(val)
+
+    def set_truncated(self, val):
+        self.agent.set_truncated(val)
 
     def step(self, action) -> Tuple[Any, float, bool, bool, dict]:
         assert not self._reset_required
-
-        self._pending_reward = .0
-        self._pending_info = {}
 
         # Interpret action
         s_control, l_control = self._action.interpret(action)
@@ -204,14 +227,7 @@ class CarEnv(gym.Env):
 
         control = np.concatenate([np.array([s_control]), l_control], -1)
 
-        for _ in range(self.physics_divider):
-            update_result = self.vehicle_model.update(control, self.dt / self.physics_divider)
-            self.vehicle_state = update_result['state']
-
-        self.steering_history = np.roll(self.steering_history, -1)
-        self.steering_history[-1] = update_result['s_new']
-        self.vehicle_last_speed = update_result['v_new']
-        self.traveled_distance += self.vehicle_last_speed * self.dt
+        self.vehicle_model.update(control, self.dt)
 
         # Update objects, check cone collision
         for obj_key, obj_val in self.objects.items():
@@ -219,16 +235,25 @@ class CarEnv(gym.Env):
 
         obs = self._make_obs()
 
-        terminated, truncated = self.problem.update(self, self.dt)
+        problem_terminated, problem_truncated = self.problem.update(self.dt)
 
-        self._reset_required = terminated or truncated
-        self._pending_info['TimeLimit.truncated'] = truncated
+        if problem_terminated:
+            self.agent.set_terminated(True)
+
+        if problem_truncated:
+            self.agent.set_truncated(True)
+
+        agent_reward, agent_terminated, agent_truncated, agent_info = self.agent.get_and_clear_pending()
 
         # gymnasium-API calls to always render if render_mode set to human
-        if self.render_mode == 'human':
-            self._render_impl()
+        self._renderer.render_automatic()
 
-        return obs, self._pending_reward, terminated, truncated, self._pending_info
+        info = {
+            **agent_info,
+            **{f"Metric.{k}": v.report() for k, v in self.metrics.items()},
+        }
+
+        return obs, agent_reward, agent_terminated, agent_truncated, info
 
     @property
     def action(self):
@@ -236,106 +261,70 @@ class CarEnv(gym.Env):
 
     @property
     def ego_pose(self):
-        return self.vehicle_model.get_pose()[:3]
+        return self.vehicle_model.pose
 
     @property
     def ego_transform(self):
-        x, y, theta = self.vehicle_model.get_pose()[:3]
-        c = np.cos(theta)
-        s = np.sin(theta)
+        return self.agent.proxy.transform
 
-        R = np.array([[c, s], [-s, c]])
-        t = -R @ np.array([x, y])
+    @property
+    def ego_collider(self):
+        return self.agent.proxy.collider
 
-        trans = np.eye(3)
-        trans[:2, :2] = R
-        trans[:2, 2] = t
-
-        return trans
+    @property
+    def last_observations(self):
+        # Deprecated but included for old code
+        return self._make_obs()
 
     def _make_obs(self):
-        self.last_observations = {
-            'state': self.problem.observe_state(self),
+        obs = {
+            'state': self.problem.observe_state(),
         }
 
         for s_key, s_val in self.sensors.items():
-            self.last_observations[s_key] = s_val.observe(self)
+            obs[s_key] = s_val.observe()
 
-        return self.last_observations
+        return obs
 
     def _make_action(self):
-        from .Actions import ContinuousSteeringAction, HumanContinuousSteeringAccelAction, ContinuousSteeringAccelAction
-        from .Actions import HumanContinuousSteeringPedalsAction, ContinuousSteeringPedalsAction
+        return make_action(self, self._config.get('action', {'type': 'continuous_steering'}))
 
-        known_types = {
-            'continuous_steering': ContinuousSteeringAction,
-            'continuous_steering_pedals': ContinuousSteeringPedalsAction,
-            'continuous_steering_accel': ContinuousSteeringAccelAction,
-            'human': HumanContinuousSteeringAccelAction,
-            'human_pedals': HumanContinuousSteeringPedalsAction,
-        }
-
-        action_dict = self._config.get('action', {'type': 'continuous_steering'})
-        kwargs = {k: v for k, v in action_dict.items() if k != 'type'}
-
-        return known_types[action_dict['type']](**kwargs)
-
-    def _make_sensors(self):
-        from .SensorConeMap import SensorConeMap
-
-        known_types = {
-            'conemap': SensorConeMap,
-        }
-
-        self.sensors = {}
-
-        for s_key, s_val in self._config.get('sensors', {}).items():
-            sensor_type = s_val['type']
-            kwargs = {k: v for k, v in s_val.items() if k != 'type'}
-
-            self.sensors[s_key] = known_types[sensor_type](self, **kwargs)
-
-        return self.sensors
+    def _make_sensors(self, proxy):
+        return make_sensors(self, proxy, self._config.get('sensors', {}))
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[Any, dict]:
+        from .VehicleProxy import VehicleProxy
+        from .TireSlipObject import TireSlipObject
+
         super(CarEnv, self).reset(seed=seed)
 
-        if self.__renderer is not None:
-            self.__renderer.reset()
+        if self._renderer is not None:
+            self._renderer.reset()
 
         # velocity_controller = LinearVelocityController(130 / 3.6, 9.81, 9.81)
-        veh_model, vm_kwargs = parse_vehicle(self._config)
+        vehicle_model = make_vehicle(self._config)
 
-        if veh_model == 'bicycle':
-            velocity_controller = make_longitudinal_model(self._config)
-            self.vehicle_model = BicycleModel(velocity_controller, **vm_kwargs)
-        elif veh_model == 'dyn_dugoff':
-            from .Physics.SingleTrackDugoffModel import SingleTrackDugoffModel
-            self.vehicle_model = SingleTrackDugoffModel(**vm_kwargs)
-        else:
-            raise ValueError(f"{veh_model = }")
+        self.agent = Agent(VehicleProxy(self, vehicle_model, self.collision_bb))
 
         self.vehicle_model.reset()
 
         self.metrics = {}
-        self.objects = {}
+        self._objects = {'ego_proxy': self.agent.proxy, 'tire_slip': TireSlipObject()}
 
-        pose = self.problem.configure_env(self, rng=self._np_random)
+        pose = self.problem.configure_env(rng=self._np_random)
 
-        self._make_sensors()
+        self.agent.sensors = self._make_sensors(self.agent.proxy)
 
         self.vehicle_model.set_pose(pose)
-        self.vehicle_last_speed = 0.
 
         self._reset_required = False
         self.steps = 0
         self.time = 0.
-        self.traveled_distance = 0.
 
-        self.steering_history = np.zeros(self.steering_history_length)
+        # Make obs before rendering to make last_observation accessible
+        reset_obs = self._make_obs()
 
         # gymnasium-API calls to always render if render_mode set to human
-        if self.render_mode == 'human':
-            self._render_impl()
+        self._renderer.render_automatic()
 
-        return self._make_obs(), {}
+        return reset_obs, {f"Metric.{k}": v.report() for k, v in self.metrics.items()}

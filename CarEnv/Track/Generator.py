@@ -1,4 +1,5 @@
 import numpy as np
+from numba import jit
 from shapely.geometry import MultiPoint, LinearRing, LineString, Point, Polygon
 import matplotlib.pyplot as plt
 
@@ -37,6 +38,7 @@ def plot_polygon(poly, ax=None, **kwargs):
     return collection
 
 
+@jit(nopython=True)
 def push_apart(pts, dist=.05, reps=3):
     for _ in range(reps):
         for i in range(len(pts)):
@@ -125,17 +127,21 @@ def make_track_centerline(extends, min_dist=15., offset=20., rng=None):
 
 
 def check_valid_track(centerline, width):
+    from .Util import shapely_safe_buffer
+
     lr = LinearRing(centerline)
 
     if not lr.is_simple:
         from shapely.validation import explain_validity
         raise BadTrackException(f"Not simple: {explain_validity(lr)}")
 
-    polygon = lr.buffer(width / 2)
+    try:
+        polygon = shapely_safe_buffer(lr, width / 2)
+    except RuntimeError:
+        raise BadTrackException("Failed to buffer")
 
     if type(polygon) != Polygon:
-        # Can also be MultiPolygon, which is certainly false
-        raise BadTrackException("Centerline is MultiPolygon")
+        raise BadTrackException("Centerline is not Polygon")
 
     if len(polygon.interiors) != 1:
         raise BadTrackException("Centerline has more than one interiors")
@@ -144,15 +150,15 @@ def check_valid_track(centerline, width):
 
 
 def make_cones_and_start_pose(centerline, width):
-    from .Util import discretize_contour
+    from .Util import discretize2
 
     poly = make_polygon_from_centerline(centerline, width)
 
     if type(poly) is not Polygon:
         raise BadTrackException("Extended centerline is not Polygon")
 
-    outer = discretize_contour(np.asarray(poly.exterior.coords)[:, :2], 5.)
-    inner = discretize_contour(np.asarray(poly.interiors[0].coords)[:, :2], 5.)
+    outer = discretize2(poly.exterior, 5.)
+    inner = discretize2(poly.interiors[0], 5.)
 
     cone_pos = np.concatenate([outer, inner])
     cone_type = np.concatenate([np.full(len(outer), 1, dtype=int), np.full(len(inner), 2, dtype=int)])
@@ -202,9 +208,8 @@ def make_full_environment(extends=(200, 200), width=5., cone_width=5., rng=None)
 
 
 def make_polygon_from_centerline(centerline, width=5.):
-    poly = LinearRing(centerline).buffer(width / 2)
-
-    return poly
+    from .Util import shapely_safe_buffer
+    return shapely_safe_buffer(LinearRing(centerline), width / 2.)
 
 
 def write_tum_track(track, path, total_width=7.):

@@ -13,9 +13,9 @@ def main():
     args = parser.parse_args()
 
     cfg = get_standard_env_config(args.env)
-    cfg['action'] = {'type': 'human'} if args.env == 'parking' else {'type': 'human_pedals'}
+    cfg['action'] = {'type': 'human_toggle'} if 'parking' in args.env else {'type': 'human_pedals'}
     cfg['dt'] = 0.05
-    env = CarEnv(cfg, render_mode='human', render_kwargs={'fullscreen': True, 'hints': {'scale': 25.}})
+    env = CarEnv(cfg, render_mode='human', render_kwargs={'fullscreen': True, 'hints': {'draw_sensors': True}})
     env.reset(seed=0)
 
     while True:

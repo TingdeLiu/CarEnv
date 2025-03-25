@@ -182,14 +182,6 @@ def draw_old_car(ctx: cairo.Context, x, y, theta, l, delta, x1, x2, y1, y2, brak
     ctx.restore()
 
 
-def draw_vehicle_proxy(ctx, env, pose=None, query_env=True, color=None):
-    pose = pose if pose is not None else env.vehicle_model.get_pose()
-    braking = env.vehicle_model.is_braking if query_env else False
-    steering_angle = env.steering_history[-1] if query_env else 0.
-
-    draw_old_car(ctx, *pose, env.vehicle_model.wheelbase, steering_angle, *env.collision_bb, braking=braking, color=color)
-
-
 def draw_vehicle_state(ctx: cairo.Context, env):
     if env.vehicle_model.v_front_ is None:
         return

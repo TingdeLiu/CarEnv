@@ -1,5 +1,6 @@
 import numpy as np
 from .SteeringController import RateLimitedSteeringModel
+from .AbstractCarModel import AbstractCarModel
 from numba import jit
 
 
@@ -49,7 +50,10 @@ def _clip(v, v_min, v_max):
 
 
 @jit(nopython=True)
-def _integrate(dt, pos, v_global, omega, omega_front, omega_rear, theta, beta, acc_ctl, brake_ctl, mass, inertia, wheelbase, inertia_front, inertia_rear, half_Acd0_rho, C_r, r_eff, engine_torque, engine_power, brake_torque, brake_balance, rwd, c_alpha_front, c_sigma_front, c_alpha_rear, c_sigma_rear, mu_front, mu_rear):
+def _integrate(dt, pos, v_global, omega, omega_front, omega_rear, theta, beta, acc_ctl, brake_ctl, mass, inertia,
+               wheelbase, inertia_front, inertia_rear, half_Acd0_rho, C_r, r_eff, engine_torque, engine_power,
+               brake_torque, brake_balance, rwd, c_alpha_front, c_sigma_front, c_alpha_rear, c_sigma_rear, mu_front,
+               mu_rear):
     # Convert to vehicle reference frame where x is forwards
     v_loc, v_front, v_rear = _calc_velocities(v_global, theta, omega, wheelbase)
     v_front_loc = _rotate(v_front, beta)
@@ -72,13 +76,13 @@ def _integrate(dt, pos, v_global, omega, omega_front, omega_rear, theta, beta, a
 
     # Tire forces
     sigma_x_front_ = (omega_front * r_eff - v_front_loc[0]) / (
-                np.maximum(np.abs(omega_front * r_eff), np.abs(v_front_loc[0])) + 1e-10)
+            np.maximum(np.abs(omega_front * r_eff), np.abs(v_front_loc[0])) + 1e-10)
     sigma_x_rear_ = (omega_rear * r_eff - v_rear[0]) / (
-                np.maximum(np.abs(omega_rear * r_eff), np.abs(v_rear[0])) + 1e-10)
+            np.maximum(np.abs(omega_rear * r_eff), np.abs(v_rear[0])) + 1e-10)
     force_front_, front_slip_ = _tire_forces(c_sigma_front, c_alpha_front, sigma_x_front_,
-                                                       v_front_loc, mu_front, F_z_axle)
+                                             v_front_loc, mu_front, F_z_axle)
     force_rear_, rear_slip_ = _tire_forces(c_sigma_rear, c_alpha_rear, sigma_x_rear_,
-                                                     v_rear, mu_rear, F_z_axle)
+                                           v_rear, mu_rear, F_z_axle)
     M_tire_front = -force_front_[0] * r_eff
     M_tire_rear = -force_rear_[0] * r_eff
 
@@ -164,12 +168,30 @@ def _integrate(dt, pos, v_global, omega, omega_front, omega_rear, theta, beta, a
            using_brake_
 
 
-class SingleTrackDugoffModel:
+@jit(nopython=True)
+def _integrate_multi_step(s_dt, steps, pos, v_global, omega, omega_front, omega_rear, theta, beta, acc_ctl, brake_ctl,
+                          mass,
+                          inertia, wheelbase, inertia_front, inertia_rear, half_Acd0_rho, C_r, r_eff, engine_torque,
+                          engine_power, brake_torque, brake_balance, rwd, c_alpha_front, c_sigma_front, c_alpha_rear,
+                          c_sigma_rear, mu_front, mu_rear):
+    result = None
+    for _ in range(steps):
+        result = _integrate(s_dt, pos, v_global, omega, omega_front, omega_rear, theta, beta, acc_ctl, brake_ctl, mass,
+                            inertia, wheelbase, inertia_front, inertia_rear, half_Acd0_rho, C_r, r_eff, engine_torque,
+                            engine_power, brake_torque, brake_balance, rwd, c_alpha_front, c_sigma_front, c_alpha_rear,
+                            c_sigma_rear, mu_front, mu_rear)
+        pos, theta, v_global, _, _, _, omega, omega_front, omega_rear, _, _, _, _, _, _, _ = result
+    return result
+
+
+class SingleTrackDugoffModel(AbstractCarModel):
     def __init__(self, wheelbase=2.4, mass=700., inertia=300.,
                  engine_power=50000., engine_torque=400., brake_torque=8000., brake_balance=.5, rwd=True,
                  c_alpha_rear=6., c_alpha_front=5., c_sigma_rear=6., c_sigma_front=5., mu_front=1., mu_rear=1.,
-                 r_eff=.3, inertia_front=1., inertia_rear=1., C_r=.015, A_Cd_rho=0.86, beta_rate=1., beta_max=0.52):
+                 r_eff=.3, inertia_front=1., inertia_rear=1., C_r=.015, A_Cd_rho=0.86, beta_rate=1., beta_max=0.52,
+                 physics_divider: int = 10):
         self.steering_model = RateLimitedSteeringModel(beta_max, beta_rate)
+        self.physics_divider = physics_divider
         self.wheelbase = wheelbase
         self.mass = mass
         self.inertia = inertia  # Clearly a good number
@@ -215,26 +237,15 @@ class SingleTrackDugoffModel:
         self.using_brake_ = None
         self.a_tol = 1
 
-    @property
-    def beta_(self):
-        return self.steering_model.beta
+        self._top_speed = None
+        self._max_angular_velocity = None
+        self._peak_traction = None
 
-    @property
-    def n_controls(self):
-        return 3
-
-    @property
-    def peak_traction(self):
-        return max(self.mu_rear, self.mu_front) * self.mass * 9.81 * 0.5
-
-    @property
-    def max_angular_velocity(self):
-        return self.top_speed / self.r_eff
-
-    @property
-    def top_speed(self):
+    def calculate_stats(self):
         """
-        Terminal velocity of the vehicle in m/s.
+        Calculate vehicle stats like top speed. Automatically called if stats are read for the first time, but must
+        be manually called again if any vehicle parameters are modified after initialization (which honestly you
+        just should not do).
         """
         # F_engine = P / v
         # F_roll = c
@@ -247,7 +258,52 @@ class SingleTrackDugoffModel:
         d = -self.engine_power
         root = np.roots([a, 0., c, d])[-1]
         assert np.isreal(root)
-        return np.real(root)
+        self._top_speed = np.real(root)
+        self._max_angular_velocity = self._top_speed / self.r_eff
+        self._peak_traction = max(self.mu_rear, self.mu_front) * self.mass * 9.81 * 0.5
+
+    @property
+    def pose(self) -> np.ndarray:
+        return np.array([*self.p_, self.theta_])
+
+    @property
+    def steering_angle(self) -> float:
+        return self.steering_model.beta
+
+    @property
+    def velocity(self) -> np.ndarray:
+        return self.v_loc_
+
+    def set_velocity(self, v):
+        self.v_loc_ = np.array([v, 0.])
+        self.v_ = _rotate(self.v_loc_, -self.theta_)
+        self.omega_front_ = v / self.r_eff
+        self.omega_rear_ = v / self.r_eff
+
+    @property
+    def n_controls(self):
+        return 3
+
+    @property
+    def peak_traction(self):
+        if self._peak_traction is None:
+            self.calculate_stats()
+        return self._peak_traction
+
+    @property
+    def max_angular_velocity(self):
+        if self._max_angular_velocity is None:
+            self.calculate_stats()
+        return self._max_angular_velocity
+
+    @property
+    def top_speed(self):
+        """
+        Terminal velocity of the vehicle in m/s.
+        """
+        if self._top_speed is None:
+            self.calculate_stats()
+        return self._top_speed
 
     @property
     def is_braking(self):
@@ -282,20 +338,16 @@ class SingleTrackDugoffModel:
         # Update the steering controller, take average steering angle for time frame as beta
         beta = self.steering_model.beta
         self.steering_model.integrate(steering_ctl, dt)
-        beta_new = self.steering_model.beta
 
-        s = _integrate(dt, self.p_, self.v_, self.omega_, self.omega_front_, self.omega_rear_, self.theta_, beta, acc_ctl,
-                       brake_ctl, self.mass, self.inertia, self.wheelbase, self.inertia_front, self.inertia_rear,
-                       self.half_Acd0_rho, self.C_r, self.r_eff, self.engine_torque, self.engine_power,
-                       self.brake_torque, self.brake_balance, self.rwd, self.c_alpha_front, self.c_sigma_front,
-                       self.c_alpha_rear, self.c_sigma_rear, self.mu_front, self.mu_rear)
+        s = _integrate_multi_step(dt / self.physics_divider, self.physics_divider, self.p_, self.v_, self.omega_,
+                                  self.omega_front_, self.omega_rear_, self.theta_, beta, acc_ctl,
+                                  brake_ctl, self.mass, self.inertia, self.wheelbase, self.inertia_front,
+                                  self.inertia_rear,
+                                  self.half_Acd0_rho, self.C_r, self.r_eff, self.engine_torque, self.engine_power,
+                                  self.brake_torque, self.brake_balance, self.rwd, self.c_alpha_front,
+                                  self.c_sigma_front,
+                                  self.c_alpha_rear, self.c_sigma_rear, self.mu_front, self.mu_rear)
 
         self.p_, self.theta_, self.v_, self.v_loc_, self.v_front_, self.v_rear_, self.omega_, self.omega_front_, \
-        self.omega_rear_, self.force_front_, self.front_slip_, self.force_rear_, self.rear_slip_, self.sigma_x_front_,\
+        self.omega_rear_, self.force_front_, self.front_slip_, self.force_rear_, self.rear_slip_, self.sigma_x_front_, \
         self.sigma_x_rear_, self.using_brake_ = s
-
-        return {
-            'state': None,
-            's_new': beta_new,
-            'v_new': self.v_loc_[0],
-        }

@@ -1,4 +1,6 @@
 # Vehicle colors
+import numpy as np
+
 EGO_VEH = (200 / 255, 211 / 255, 23 / 255)
 OTHER_VEH_1 = (.71, .204, .443)
 # OTHER_VEH_1 = (.839, .188, .192)
@@ -20,3 +22,7 @@ BRAKE_LIGHT_UNLIT = (.4, 0., 0.)
 BRAKE_LIGHT_LIT = (1., .2, .2)
 GLASS = (.2, .4, .7)
 TIRE = (.3, .3, .3)
+
+
+def random_vehicle_color(rng: np.random.Generator):
+    return rng.uniform(.2, 1., (3,))

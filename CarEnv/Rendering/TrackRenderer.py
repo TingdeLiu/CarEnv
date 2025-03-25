@@ -1,8 +1,9 @@
 import cairo
 from .Rendering import stroke_fill
+from shapely.geometry import Polygon
 
 
-def _trace(ctx: cairo.Context, path):
+def trace_path(ctx: cairo.Context, path):
     ctx.move_to(*path[0])
 
     for el in path[1:]:
@@ -20,15 +21,11 @@ class TrackRenderer:
         self._track_path = None
         self._center_path = None
 
-    def render(self, ctx: cairo.Context, centerline, width):
-        from shapely.geometry import LinearRing
-
+    def render(self, ctx: cairo.Context, centerline, poly: Polygon):
         if self._track_path is None:
-            poly = LinearRing(centerline).buffer(width / 2 + .3)  # Some extra padding
-
-            _trace(ctx, poly.exterior.coords)
+            trace_path(ctx, poly.exterior.coords)
             for interior in poly.interiors:
-                _trace(ctx, interior.coords)
+                trace_path(ctx, interior.coords)
 
             self._track_path = ctx.copy_path()
         else:
@@ -37,7 +34,7 @@ class TrackRenderer:
         stroke_fill(ctx, (0., 0., 0.), (.6, .6, .6))
 
         if self._center_path is None:
-            _trace(ctx, centerline)
+            trace_path(ctx, centerline)
             self._center_path = ctx.copy_path()
         else:
             ctx.append_path(self._center_path)

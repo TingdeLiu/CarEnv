@@ -1,7 +1,8 @@
+from .Object import Object
 import numpy as np
 
 
-class BatchedObjects:
+class BatchedObjects(Object):
     @property
     def features_dim(self):
         count, n_features = self.data.shape
@@ -27,6 +28,3 @@ class BatchedObjects:
     def __len__(self):
         count, n_features = self.data.shape
         return count
-
-    def update(self, env):
-        pass

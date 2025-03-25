@@ -6,7 +6,8 @@ import numpy as np
 
 
 class ContinuousSteeringAction(Action):
-    def __init__(self, target_speed=15 / 3.6):
+    def __init__(self, env, target_speed=15 / 3.6):
+        super(ContinuousSteeringAction, self).__init__(env)
         self.target_speed = target_speed
 
     @property

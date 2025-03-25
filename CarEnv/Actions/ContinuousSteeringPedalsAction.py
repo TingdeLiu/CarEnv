@@ -1,13 +1,13 @@
 import gymnasium as gym
 
 from .Action import Action
-from ..Physics.VelocityController import DirectVelocityController, LinearVelocityController
 from typing import Any, Tuple
 import numpy as np
 
 
 class ContinuousSteeringPedalsAction(Action):
-    def __init__(self):
+    def __init__(self, env):
+        super(ContinuousSteeringPedalsAction, self).__init__(env)
         self.throttle_position_ = 0.
         self.brake_position_ = 0.
 

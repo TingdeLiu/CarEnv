@@ -8,7 +8,8 @@ from .Action import Action
 
 
 class HumanContinuousSteeringPedalsAction(Action):
-    def __init__(self, js_steer_axis=0, js_throttle_axis=2, js_brake_axis=3):
+    def __init__(self, env, js_steer_axis=0, js_throttle_axis=2, js_brake_axis=3):
+        super(HumanContinuousSteeringPedalsAction, self).__init__(env)
         import pygame
 
         self.js_steer_axis = js_steer_axis

@@ -1,90 +1,102 @@
 import cairo
 import numpy as np
-from .Rendering import BitmapRenderer, draw_vehicle_proxy, draw_vehicle_state
-from .ConeRenderer import ConeRenderer
-from .TrackRenderer import TrackRenderer
+from .Rendering import BitmapRenderer, draw_old_car, draw_vehicle_state
+from CarEnv.DeferredDraw import DeferredDraw
+from typing import List, Optional, Union, Callable
+
+
+class RenderCallback:
+    def __call__(self, renderer, env, ctx):
+        raise NotImplementedError
+
+
+def transform_fixed_point(ctx: cairo.Context, width, height, point, scale=20.):
+    x, y = point
+    ctx.translate(width / 2, height / 2)
+    ctx.scale(scale, scale)
+    ctx.translate(-x, -y)
+
+
+def transform_for_pose(ctx: cairo.Context, width, height, pose, scale=20., orient_forward=True, forward_center=.8):
+    x, y, theta = pose
+
+    if orient_forward:
+        ctx.translate(width / 2, height * forward_center)
+        ctx.rotate(-theta - np.pi / 2)
+    else:
+        ctx.translate(width / 2, height / 2)
+
+    ctx.scale(scale, scale)
+    ctx.translate(-x, -y)
+
+
+def transform_for_bbox(ctx: cairo.Context, width, height, bbox):
+    xmin, ymin, xmax, ymax = bbox
+
+    cx, cy = (xmin + xmax) / 2, (ymin + ymax) / 2
+
+    scale = np.array([
+        (cx - xmin) / (width / 2),
+        (xmax - cx) / (width / 2),
+        (cy - ymin) / (height / 2),
+        (ymax - cy) / (height / 2),
+    ])
+
+    scale = 1. / np.max(scale)
+
+    ctx.translate(width / 2, height / 2)
+    ctx.scale(scale, scale)
+    ctx.translate(-cx, -cy)
 
 
 class BirdViewRenderer:
-    def __init__(self, width, height, scale=15., orient_forward=False, draw_physics=False, draw_sensors=False, hud=True,
-                 forward_center=.8, draw_grid=True):
+    def __init__(self, width, height, draw_physics=False, draw_sensors=False, hud=True, draw_grid=False,
+                 callbacks: Optional[List[Union[Callable, RenderCallback]]] = None):
+        if draw_grid:
+            from warnings import warn
+            warn("draw_grid is currently unsupported and will be ignored")
+
         self._bvr = BitmapRenderer(width, height)
         self._bvr.open()
         self.width = width
         self.height = height
-        self.scale = scale
-        self.orient_forward = orient_forward
-        self.forward_center = forward_center
-        self.last_transform = None
-        self.slip_lines = []
         self.draw_physics = draw_physics
         self.draw_sensors = draw_sensors
+        self.callbacks = callbacks or []
         self.draw_hud = hud
         self.draw_grid = draw_grid
         self.start_lights = None
         self.ghosts = None
         self.show_track = True
         self.show_digital_tachometer = False
-        self._cone_renderer = ConeRenderer()
-        self._track_renderer = TrackRenderer()
-        self._bg_grid_path = None
-
-    def _transform_for_view(self, ctx: cairo.Context, x, y, theta):
-        if self.orient_forward:
-            ctx.translate(self.width / 2, self.height * self.forward_center)
-            ctx.rotate(-theta - np.pi / 2)
-        else:
-            ctx.translate(self.width / 2, self.height / 2)
-        ctx.scale(self.scale, self.scale)
-        ctx.translate(-x, -y)
 
     def _render_ctx(self, env, ctx):
         from .Gauge import Gauge
-        from .Colors import BACKGROUND_GRID
-        from .Rendering import stroke_fill
-
-        pose = env.ego_pose
-
-        # Tried to do this with patterns but unbearably slow
-        if self._bg_grid_path is None:
-            s = 1000
-            for t in np.linspace(-s, s, 41):
-                ctx.move_to(-s, t)
-                ctx.line_to(s, t)
-                ctx.move_to(t, -s)
-                ctx.line_to(t, s)
-            self._bg_grid_path = ctx.copy_path_flat()
-            ctx.new_path()
-
-        # Since the background grid doesn't repeat endlessly, snap to nearest origin
-        if self.draw_grid:
-            gx, gy, gtheta = pose
-            self._transform_for_view(ctx, gx % 50, gy % 50, gtheta)
-            ctx.append_path(self._bg_grid_path)
-            stroke_fill(ctx, BACKGROUND_GRID, None)
 
         ctx.identity_matrix()
-        self._transform_for_view(ctx, *pose)
+        env.problem.transform_ctx(ctx, self.width, self.height)
 
-        if hasattr(env.problem, 'track_dict') and self.show_track:
-            self._track_renderer.render(ctx, env.problem.track_dict['centerline'], env.problem.track_dict['width'])
+        dd = DeferredDraw()
 
-        self.render_tire_slip(ctx, env)
+        env.problem.draw(dd)
 
-        if 'cones' in env.objects:
-            cones = env.objects['cones']
-            types = np.argmax(cones.data[:, 2:], axis=-1) + 1
-            self._cone_renderer.render(ctx, cones.data[:, :2], types, cones.radius)
+        for obj in env.objects.values():
+            if hasattr(obj, 'draw'):
+                obj.draw(dd)
+
+        dd.perform(ctx)
 
         self.render_ghosts(ctx, env)
-        draw_vehicle_proxy(ctx, env)
+
+        for cb in self.callbacks:
+            cb(self, env, ctx)
 
         if self.draw_hud:
-            env.problem.render(ctx, env)
-
             if self.draw_sensors:
-                for s in env.sensors.values():
-                    s.draw(ctx, env)
+                for ag in env.agents:
+                    agent = env.get_agent(ag)
+                    for s_k, s_v in agent.sensors.items():
+                        s_v.draw(ctx)
 
             if self.draw_physics:
                 ctx.identity_matrix()
@@ -92,14 +104,17 @@ class BirdViewRenderer:
                 draw_vehicle_state(ctx, env)
 
             ctx.identity_matrix()
-            ctx.translate(self.width - 80, self.height - 80)
-            Gauge(0, 100).draw(ctx, abs(env.vehicle_last_speed) * 3.6)
-            self.render_pedals(ctx, env)
 
-            if self.show_digital_tachometer:
-                self.render_digital_tachometer(ctx, env)
+            # Only render this if not MARL
+            if hasattr(env, 'vehicle_model'):
+                ctx.translate(self.width - 80, self.height - 80)
+                Gauge(0, 100).draw(ctx, abs(env.vehicle_model.velocity[0]) * 3.6)
+                self.render_pedals(ctx, env)
 
-            env.action.render(ctx, self.width, self.height)
+                if self.show_digital_tachometer:
+                    self.render_digital_tachometer(ctx, env)
+
+                env.action.render(ctx, self.width, self.height)
 
             self.render_start_lights(ctx)
 
@@ -122,57 +137,7 @@ class BirdViewRenderer:
             surface.finish()
 
     def reset(self):
-        self.last_transform = None
         self.ghosts = None
-        self._track_renderer.reset()
-        self.slip_lines = []
-        self._cone_renderer.reset()
-
-    def _add_slip_line(self, t1, t2, x, y):
-        vec = np.array([x, y, 1])
-
-        p1 = (t1 @ vec)[:2]
-        p2 = (t2 @ vec)[:2]
-        self.slip_lines.append((p1, p2))
-        self.slip_lines = self.slip_lines[-500:]  # Limit to not overwhelm
-
-    def render_tire_slip(self, ctx: cairo.Context, env):
-        from .Rendering import stroke_fill
-
-        if not hasattr(env.vehicle_model, "front_slip_"):
-            # Does not appear to be correct vehicle model
-            return
-
-        transform = np.linalg.inv(env.ego_transform)
-
-        if self.last_transform is None:
-            self.last_transform = transform
-            return
-
-        # Return if no physics set yet
-        if env.vehicle_model.front_slip_ is None:
-            return
-
-        front_slip = env.vehicle_model.front_slip_
-        rear_slip = env.vehicle_model.rear_slip_
-
-        h_wb = env.vehicle_model.wheelbase / 2
-        h_w = env.collision_bb[-1]
-
-        if front_slip:
-            self._add_slip_line(transform, self.last_transform, h_wb, -h_w)
-            self._add_slip_line(transform, self.last_transform, h_wb, h_w)
-        if rear_slip:
-            self._add_slip_line(transform, self.last_transform, -h_wb, -h_w)
-            self._add_slip_line(transform, self.last_transform, -h_wb, h_w)
-
-        self.last_transform = transform
-
-        ctx.set_line_cap(cairo.LINE_CAP_ROUND)
-        for p1, p2 in self.slip_lines:
-            ctx.move_to(*p1)
-            ctx.line_to(*p2)
-        stroke_fill(ctx, (0., 0., 0.), None, 3.)
 
     def render_pedals(self, ctx: cairo.Context, env):
         from .Rendering import stroke_fill
@@ -197,9 +162,9 @@ class BirdViewRenderer:
         ctx.rectangle(0, 80 - bar_size, 20, bar_size)
         stroke_fill(ctx, (0., 0., 0.), (1., 0., 0.))
 
-    def render_digital_tachometer(self, ctx:cairo.Context, env):
+    def render_digital_tachometer(self, ctx: cairo.Context, env):
         from .Rendering import stroke_fill
-        v = f"{int(env.vehicle_last_speed * 3.6)}"
+        v = f"{int(env.vehicle_model.velocity[0] * 3.6)}"
         ctx.select_font_face("Latin Modern Mono", cairo.FontSlant.NORMAL, cairo.FontWeight.BOLD)
         advance = ctx.text_extents("0").x_advance
         height = ctx.text_extents("0").height
@@ -218,7 +183,8 @@ class BirdViewRenderer:
             ctx.text_path(k)
             stroke_fill(ctx, (0., 0., 0.), (1., .3, .3))
 
-        if hasattr(env.vehicle_model, "front_slip_") and env.vehicle_model.front_slip_ is not None and env.vehicle_model.front_slip_[0]:
+        if hasattr(env.vehicle_model, "front_slip_") and env.vehicle_model.front_slip_ is not None and \
+                env.vehicle_model.front_slip_[0]:
             ctx.translate(0, self.height - 60 + height / 2)
             ctx.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
             ctx.arc(self.width / 2 - 100, -30, 20, 0, 2 * np.pi)
@@ -233,7 +199,8 @@ class BirdViewRenderer:
             return
 
         for color, pose in self.ghosts:
-            draw_vehicle_proxy(ctx, env, pose=pose, query_env=False, color=color)
+            draw_old_car(ctx, *pose, env.vehicle_model.wheelbase, 0., *env.collision_bb, braking=False,
+                         color=color)
 
     def render_start_lights(self, ctx: cairo.Context):
         from .Rendering import stroke_fill
